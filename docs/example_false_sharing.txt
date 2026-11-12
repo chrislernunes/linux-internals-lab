@@ -1,0 +1,85 @@
+linux-internals-lab
+cpu: Intel(R) Xeon(R) Platinum 8481C CPU @ 2.70GHz
+cpus online: 2
+page size: 4096 bytes
+timer: invariant TSC, 0.370381 ns/tick (~2699.92 MHz TSC rate)
+  TSC ticks are wall time, not retired core cycles.
+
+============================================================
+5. false sharing
+============================================================
+  Two threads, each doing 300000 relaxed fetch_adds on its own counter.
+  Pinned to cpu 0 and cpu 1. Same instructions, different addresses.
+
+  same line (packed atomics)
+  samples=7  ops/sample=300000  unit=ns per rmw
+           min         p50         p90         p99         max        mean      stddev
+         35.97       37.98       38.38       38.70       38.74       37.60        0.98
+  throughput: 53189667 rmw/s
+  histogram (ns, bins up to p99, last is above p99):
+   [     35.97,      36.32) #################### 1
+   [     36.32,      36.66) #################### 1
+   [     36.66,      37.00)  0
+   [     37.00,      37.34)  0
+   [     37.34,      37.68)  0
+   [     37.68,      38.02) ######################################## 2
+   [     38.02,      38.36) ######################################## 2
+   [     38.36,      38.70)  0
+   [     38.70,      38.74] #################### 1  above-p99
+
+  padded 64B
+  samples=7  ops/sample=300000  unit=ns per rmw
+           min         p50         p90         p99         max        mean      stddev
+          6.12        6.20        6.38        6.46        6.47        6.23        0.13
+  throughput: 320901201 rmw/s
+  histogram (ns, bins up to p99, last is above p99):
+   [      6.12,       6.16) ######################################## 3
+   [      6.16,       6.20)  0
+   [      6.20,       6.25) ############# 1
+   [      6.25,       6.29) ############# 1
+   [      6.29,       6.33) ############# 1
+   [      6.33,       6.37)  0
+   [      6.37,       6.41)  0
+   [      6.41,       6.46)  0
+   [      6.46,       6.47] ############# 1  above-p99
+
+  padded 128B
+  samples=7  ops/sample=300000  unit=ns per rmw
+           min         p50         p90         p99         max        mean      stddev
+          6.14        6.49        6.78        7.01        7.04        6.46        0.31
+  throughput: 309834161 rmw/s
+  histogram (ns, bins up to p99, last is above p99):
+   [      6.14,       6.25) ######################################## 3
+   [      6.25,       6.36)  0
+   [      6.36,       6.47)  0
+   [      6.47,       6.57) ########################## 2
+   [      6.57,       6.68) ############# 1
+   [      6.68,       6.79)  0
+   [      6.79,       6.90)  0
+   [      6.90,       7.01)  0
+   [      7.01,       7.04] ############# 1  above-p99
+
+  ratio mean(same line) / mean(64B pad) = 6.03315
+  ratio mean(64B pad) / mean(128B pad) = 0.965513  (above ~1 suggests adjacent-line prefetch coupling)
+
+why:
+  A cache line (64 bytes on this x86) is the unit of coherence, not
+  the variable. Two cores cannot both hold the same line in Modified.
+  Each fetch_add needs the line Exclusive/Modified, which invalidates
+  the other core. That is a read-for-ownership (RFO) per increment,
+  even though the threads never touch each other's counter and even
+  though the memory order is relaxed. On x86 the RMW is a lock-prefixed
+  instruction regardless of memory_order_relaxed.
+  Padding to 64 bytes gives each core its own line, so the increment
+  hits in L1. Padding to 128 bytes also steps past Intel's adjacent-line
+  prefetcher, which otherwise pulls the neighbour and can re-couple two
+  'nicely padded' counters. If the 64B and 128B results match, the
+  prefetcher is not the bottleneck on this CPU today; the 64B result
+  is still the one to ship in a struct-of-counters.
+  Verify, do not trust the story alone:
+    perf stat -e cache-misses,LLC-loads,LLC-load-misses,cycles,instructions \
+      taskset -c 0,1 ./build/linuxlab false-sharing
+  The same-line case should show a miss storm with almost the same
+  instruction count. If both look identical, the threads were not
+  actually running on two cores (check /proc/self/status Cpus_allowed
+  and that you have two online CPUs).

@@ -1,0 +1,19 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DLAB_NATIVE_ARCH=OFF
+      - name: build
+        run: cmake --build build -j
+      - name: statistics self-test
+        run: ./build/linuxlab self-test
+      - name: smoke the suite
+        run: ./build/linuxlab all --quick --iters 3 --warmup 1 --csv "$RUNNER_TEMP/suite.csv"

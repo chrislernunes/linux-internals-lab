@@ -1,0 +1,9 @@
+build/
+build-*/
+results/
+*.csv
+compile_commands.json
+.cache/
+*.o
+linuxlab
+.DS_Store

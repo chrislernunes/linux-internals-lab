@@ -1,0 +1,84 @@
+linux-internals-lab
+cpu: Intel(R) Xeon(R) Platinum 8481C CPU @ 2.70GHz
+cpus online: 2
+page size: 4096 bytes
+timer: invariant TSC, 0.370379 ns/tick (~2699.94 MHz TSC rate)
+  TSC ticks are wall time, not retired core cycles.
+
+============================================================
+1. process creation
+============================================================
+  Each sample is one create + waitpid. No batching.
+  Child paths use _exit so they do not run destructors.
+
+  fork + _exit (no exec)
+  samples=40  ops/sample=1  unit=us per creation
+           min         p50         p90         p99         max        mean      stddev
+         152.9       165.6       220.0       353.0       413.8       182.9        46.3
+  throughput: 5467 creation/s
+  histogram (us, bins up to p99, last is above p99):
+   [     152.9,      177.9) ######################################## 24
+   [     177.9,      202.9) ########### 7
+   [     202.9,      227.9) ########## 6
+   [     227.9,      252.9) # 1
+   [     252.9,      277.9) # 1
+   [     277.9,      302.9)  0
+   [     302.9,      328.0)  0
+   [     328.0,      353.0)  0
+   [     353.0,      413.8] # 1  above-p99
+
+  fork + exec /bin/true + wait
+  samples=40  ops/sample=1  unit=ms per creation
+           min         p50         p90         p99         max        mean      stddev
+          1.01        1.29        1.38        1.45        1.46        1.26        0.11
+  throughput: 792 creation/s
+  histogram (ms, bins up to p99, last is above p99):
+   [      1.01,       1.06) ################ 6
+   [      1.06,       1.12)  0
+   [      1.12,       1.17)  0
+   [      1.17,       1.23) ##### 2
+   [      1.23,       1.28) ############################# 11
+   [      1.28,       1.34) ######################################## 15
+   [      1.34,       1.39) ##### 2
+   [      1.39,       1.45) ######## 3
+   [      1.45,       1.46] ## 1  above-p99
+
+  posix_spawn /bin/true + wait
+  samples=40  ops/sample=1  unit=ms per creation
+           min         p50         p90         p99         max        mean      stddev
+          0.94        1.10        1.45        5.15        5.22        1.36        0.95
+  throughput: 733 creation/s
+  histogram (ms, bins up to p99, last is above p99):
+   [      0.94,       1.46) ######################################## 36
+   [      1.46,       1.99) # 1
+   [      1.99,       2.52)  0
+   [      2.52,       3.04)  0
+   [      3.04,       3.57) # 1
+   [      3.57,       4.10)  0
+   [      4.10,       4.62)  0
+   [      4.62,       5.15) # 1
+   [      5.15,       5.22] # 1  above-p99
+
+why:
+  fork() is clone() without CLONE_VM. The kernel duplicates the
+  task_struct, the fd table, and the page tables. Pages themselves
+  are copy-on-write, so the byte copy is cheap; the page-table copy
+  is not, and it grows with the parent's address space.
+  execve() throws that address space away: it loads the ELF, maps the
+  dynamic linker, and flushes the TLB. That is why fork+exec is
+  several times fork+_exit.
+  posix_spawn() is what most runtimes should call instead of fork+exec.
+  Modern glibc implements the common case with clone(CLONE_VM|CLONE_VFORK):
+  the child borrows the parent's address space until exec, so the page
+  tables are not copied, and the parent stays stopped so that sharing
+  is safe. The saving is proportional to the parent's page tables. In
+  this small process exec dominates, and posix_spawn may only beat
+  fork+exec by a little. Allocate a multi-gigabyte buffer in the parent
+  and run again if you want the gap to open up. strace -f -e clone,clone3,execve
+  shows the flags. Raw clone() from C++ is intentionally not called:
+  the child would share or abandon glibc TLS, which corrupts the parent.
+  Reaping is a wait queue wakeup inside waitpid. Throughput is the
+  inverse of the full create-and-reap latency, not of the syscall alone.
+  A large parent (big heap, many threads' stacks) makes fork slower.
+  This process is small; do not quote these numbers as 'the' fork cost
+  of a fat server.
