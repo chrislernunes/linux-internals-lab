@@ -1,4 +1,4 @@
-# linux-internals-lab
+# linux-internals
 
 A C++20 lab that measures real Linux behavior — process and thread lifetime,
 context switches, lock contention, cache-line sharing, page faults, affinity,
